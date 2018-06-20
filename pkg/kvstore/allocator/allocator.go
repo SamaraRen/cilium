@@ -214,6 +214,9 @@ type Allocator struct {
 
 	// stopGC is the channel used to stop the garbage collector
 	stopGC chan struct{}
+
+	// randomIDs is a slice of random IDs between a.min and a.max
+	randomIDs []int
 }
 
 func locklessCapability() bool {
@@ -380,21 +383,32 @@ var (
 	idRandomizerMutex lock.Mutex
 )
 
+func (a *Allocator) newRandomIDs() {
+	idRandomizerMutex.Lock()
+	a.randomIDs = idRandomizer.Perm(int(a.max - a.min + 1))
+	idRandomizerMutex.Unlock()
+}
+
 // Naive ID allocation mechanism.
 func (a *Allocator) selectAvailableID() (ID, string) {
-	idRandomizerMutex.Lock()
-	defer idRandomizerMutex.Unlock()
-
 	a.mutex.RLock()
 	defer a.mutex.RUnlock()
 
-	tried := 0
+	for attempt := 0; attempt < 2; attempt++ {
+		for i, r := range a.randomIDs {
+			id := ID(r) + a.min
+			if _, ok := a.cache[id]; !ok && a.localKeys.lookupID(id) == "" {
+				// remove the previously tried IDs that are already in
+				// use from the list of IDs to attempt allocation
+				if len(a.randomIDs) > 0 {
+					a.randomIDs = a.randomIDs[i+1:]
+				}
+				return id, id.String()
+			}
+		}
 
-	for _, r := range idRandomizer.Perm(int(a.max - a.min + 1)) {
-		id := ID(r) + a.min
-		tried++
-		if _, ok := a.cache[id]; !ok && a.localKeys.lookupID(id) == "" {
-			return id, id.String()
+		if attempt == 0 {
+			a.newRandomIDs()
 		}
 	}
 
